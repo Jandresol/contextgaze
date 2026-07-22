@@ -45,9 +45,10 @@ const state = {
 const $ = id => document.getElementById(id);
 const stopWords = new Set("the a an and or but if then is are was were be been being to of in on at for with from this that it you your my me i we they he she do did does how what when where who why can could would should".split(" "));
 const calibrationPoints = [
-  [0.10, 0.12], [0.50, 0.12], [0.90, 0.12],
+  [0.10, 0.10], [0.50, 0.10], [0.90, 0.10],
   [0.10, 0.50], [0.50, 0.50], [0.90, 0.50],
-  [0.10, 0.88], [0.50, 0.88], [0.90, 0.88]
+  [0.10, 0.90], [0.50, 0.90], [0.90, 0.90],
+  [0.30, 0.30], [0.70, 0.30], [0.30, 0.70], [0.70, 0.70]
 ];
 
 function setPill(id, text, on) {
@@ -71,33 +72,85 @@ function retrieveMemories(query, limit = 4) {
 function lastPartnerTurn() {
   return [...state.turns].reverse().find(t => t.role === "partner")?.text || "";
 }
-function generateSuggestions() {
+function ruleSuggestions(text) {
+  const lower = text.toLowerCase();
+  if (/\b(how are you|how do you feel|feeling)\b/.test(lower))
+    return ["I am comfortable.", "I am tired.", "I need help.", "Please ask me more specifically."];
+  if (lower.includes("emma"))
+    return ["Yes, she visited yesterday.", "It was good to see her.", "How are Noah and Lily?", "When is Emma coming back?"];
+  if (/\b(appointment|doctor|neurolog)/.test(lower))
+    return ["My appointment is Tuesday at 10.", "Please add that to my questions.", "Ask about my medication.", "I want Sarah there with me."];
+  if (/\b(red sox|baseball|game)\b/.test(lower))
+    return ["How did the Red Sox do?", "I watched the game.", "Tell me the score.", "Who are they playing next?"];
+  if (/\b(did|do you|are you|is it|was it|can you)\b/.test(lower))
+    return ["Yes.", "No.", "I am not sure.", "Please repeat the question."];
+  return ["Tell me more.", "What happened next?", "I agree.", "I am not sure."];
+}
+
+async function generateSuggestions() {
   const text = lastPartnerTurn();
   if (!text) {
     state.suggestions = ["I am comfortable.", "Please repeat that.", "I need help.", "Tell me what is happening."];
     renderSuggestions();
     return;
   }
-  const lower = text.toLowerCase();
   const relevant = retrieveMemories(text);
-  let candidates;
-  if (/\b(how are you|how do you feel|feeling)\b/.test(lower)) {
-    candidates = ["I am comfortable.", "I am tired.", "I need help.", "Please ask me more specifically."];
-  } else if (lower.includes("emma")) {
-    candidates = ["Yes, she visited yesterday.", "It was good to see her.", "How are Noah and Lily?", "When is Emma coming back?"];
-  } else if (/\b(appointment|doctor|neurolog)/.test(lower)) {
-    candidates = ["My appointment is Tuesday at 10.", "Please add that to my questions.", "Ask about my medication.", "I want Sarah there with me."];
-  } else if (/\b(red sox|baseball|game)\b/.test(lower)) {
-    candidates = ["How did the Red Sox do?", "I watched the game.", "Tell me the score.", "Who are they playing next?"];
-  } else if (/\b(did|do you|are you|is it|was it|can you)\b/.test(lower)) {
-    candidates = ["Yes.", "No.", "I am not sure.", "Please repeat the question."];
-  } else {
-    candidates = ["Tell me more.", "What happened next?", "I agree.", "I am not sure."];
-  }
-  state.suggestions = [...new Set(candidates)].slice(0,4);
   $("retrievalNote").textContent = relevant.length
     ? `Retrieved: ${relevant.join(" • ")}`
-    : "No personal memory matched; using conversational intent only.";
+    : "No personal memory matched.";
+
+  const key = (window.GEMINI_API_KEY || "").trim();
+  if (key) {
+    try {
+      const memoryBlock = relevant.length
+        ? `Relevant personal facts about the user:\n${relevant.map(m => `- ${m}`).join("\n")}\n\n`
+        : "";
+      const recentContext = state.turns.slice(-6).map(t =>
+        `${t.role === "partner" ? "Partner" : "User"}: ${t.text}`).join("\n");
+      const prompt = `You are an AAC (augmentative and alternative communication) assistant for a person with limited speech. Generate exactly 4 short, natural response suggestions the user could say next.
+
+${memoryBlock}Recent conversation:
+${recentContext}
+
+Rules:
+- Each suggestion must be a complete, natural spoken sentence (not just one word)
+- Keep suggestions concise (under 10 words each)
+- Make them directly relevant to what the partner just said
+- Vary the responses (don't make them all identical in tone)
+- Return ONLY a JSON array of 4 strings, nothing else
+
+Example output: ["Yes, that sounds good.", "I am not sure.", "Tell me more about that.", "Please ask Sarah."]`;
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${key}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        }
+      );
+      if (!res.ok) throw new Error(`Gemini ${res.status}`);
+      const data = await res.json();
+      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]);
+        if (Array.isArray(parsed) && parsed.length >= 2) {
+          state.suggestions = parsed.slice(0, 4);
+          $("retrievalNote").textContent = (relevant.length
+            ? `Retrieved: ${relevant.join(" • ")} — `
+            : "") + "AI suggestions";
+          renderSuggestions();
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn("Gemini failed, falling back to rules:", e);
+      $("retrievalNote").textContent += ` (AI error: ${e.message})`;
+    }
+  }
+
+  state.suggestions = ruleSuggestions(text);
   renderSuggestions();
 }
 
@@ -360,6 +413,7 @@ function startCalibration() {
     return;
   }
   state.calibrationSamples = [];
+  state.calibrationScreenPoints = [];
   state.calibrationPointIndex = 0;
   positionCalibrationTarget();
   $("calibrationDialog").showModal();
@@ -369,32 +423,82 @@ function positionCalibrationTarget() {
   const target = $("calibrationTarget");
   target.style.left = `${x*100}%`;
   target.style.top = `${y*100}%`;
-  $("calibrationProgress").textContent = `Point ${state.calibrationPointIndex+1} of ${calibrationPoints.length}`;
+  $("calibrationProgress").textContent = `Point ${state.calibrationPointIndex+1} of ${calibrationPoints.length} — look at the dot, then click it`;
   $("calibrationTitle").textContent = "Look at the target, then select it";
 }
 async function collectCalibrationPoint() {
   if (state.collecting || !state.latestFeatures) return;
   state.collecting = true;
   state.collectionBuffer = [];
-  $("calibrationTitle").textContent = "Hold your gaze…";
   $("calibrationTarget").classList.add("collecting");
-  await new Promise(r => setTimeout(r, 850));
+
+  // settling delay — discard samples while eyes are still moving to target
+  $("calibrationTitle").textContent = "Hold still…";
+  await new Promise(r => setTimeout(r, 500));
+  state.collectionBuffer = [];
+
+  // actual collection window
+  $("calibrationTitle").textContent = "Hold your gaze…";
+  await new Promise(r => setTimeout(r, 900));
   state.collecting = false;
   $("calibrationTarget").classList.remove("collecting");
 
-  const [nx,ny] = calibrationPoints[state.calibrationPointIndex];
-  const targetX = nx * window.innerWidth;
-  const targetY = ny * window.innerHeight;
+  const targetEl = $("calibrationTarget");
+  const r = targetEl.getBoundingClientRect();
+  const targetX = r.left + r.width / 2;
+  const targetY = r.top + r.height / 2;
   const usable = state.collectionBuffer.filter(Boolean);
   if (usable.length < 5) {
     $("calibrationTitle").textContent = "Face lost. Try this point again.";
     return;
   }
-  for (const f of usable) state.calibrationSamples.push({f, x:targetX, y:targetY});
+
+  // outlier rejection: keep samples within 1 std-dev of mean for first two features (lx, ly)
+  const trimmed = rejectOutliers(usable);
+  const keepRatio = trimmed.length / usable.length;
+
+  // flash screen to show sample quality: green=good, blue=ok, red=poor
+  const stage = $("calibrationStage");
+  if (keepRatio >= 0.85 && trimmed.length >= 8) {
+    flashStage(stage, "rgba(31,157,90,.35)");   // green — steady gaze
+  } else if (keepRatio >= 0.6 && trimmed.length >= 4) {
+    flashStage(stage, "rgba(37,87,214,.35)");   // blue — acceptable
+  } else {
+    flashStage(stage, "rgba(200,40,30,.35)");   // red — too noisy, advise retry
+    $("calibrationTitle").textContent = "Too much movement — try again for better accuracy";
+    state.collecting = false;
+    return;
+  }
+
+  for (const f of trimmed) state.calibrationSamples.push({f, x:targetX, y:targetY});
+  state.calibrationScreenPoints = state.calibrationScreenPoints || [];
+  state.calibrationScreenPoints.push({x: targetX, y: targetY});
+
   state.calibrationPointIndex++;
   if (state.calibrationPointIndex >= calibrationPoints.length) finishCalibration();
   else positionCalibrationTarget();
 }
+
+function rejectOutliers(samples) {
+  if (samples.length < 4) return samples;
+  // use indices 1 (lx) and 2 (ly) — the core iris position features
+  for (const idx of [1, 2]) {
+    const vals = samples.map(s => s[idx]);
+    const mean = vals.reduce((a,b) => a+b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a,b) => a + (b-mean)**2, 0) / vals.length);
+    samples = samples.filter(s => Math.abs(s[idx] - mean) <= 2 * std);
+  }
+  return samples;
+}
+function flashStage(el, color) {
+  el.style.transition = "background .1s";
+  el.style.background = color;
+  setTimeout(() => {
+    el.style.background = "";
+    setTimeout(() => { el.style.transition = ""; }, 400);
+  }, 600);
+}
+
 function finishCalibration() {
   try {
     state.calibration = fitCalibration(state.calibrationSamples);
@@ -470,9 +574,32 @@ function updatePredictedGaze(features) {
   dotEl.style.top = `${state.smoothY}px`;
   handleDwell(state.smoothX,state.smoothY);
 }
+function gazeTargetAt(x, y) {
+  return document.elementsFromPoint(x, y).find(el =>
+    el.classList?.contains("response-target") ||
+    el.classList?.contains("word-btn") ||
+    el.classList?.contains("key")
+  ) || null;
+}
+function activateGazeTarget(target) {
+  if (target.classList.contains("key")) {
+    const k = (target.childNodes[0]?.textContent || "").trim();
+    if (k === "Space") composeInput.value += " ";
+    else if (k === "⌫") composeInput.value = composeInput.value.slice(0, -1);
+    else if (k === "Clear") composeInput.value = "";
+    else if (k === "Speak") { if (composeInput.value.trim()) selectResponse(composeInput.value.trim()); }
+    else composeInput.value += k;
+    updateWordSuggestions();
+  } else if (target.classList.contains("word-btn")) {
+    composeInput.value += (composeInput.value.endsWith(" ") || composeInput.value === "" ? "" : " ") + target.textContent + " ";
+  } else {
+    const text = target.dataset.text || target.dataset.utility;
+    if (text) selectResponse(text);
+  }
+}
 function handleDwell(x,y) {
   if ($("calibrationDialog").open) return;
-  const target = document.elementsFromPoint(x,y).find(el => el.classList?.contains("response-target"));
+  const target = gazeTargetAt(x, y);
   const dwellMs = Number($("dwellSelect").value);
   if (target !== state.dwellTarget) {
     clearDwell();
@@ -486,13 +613,12 @@ function handleDwell(x,y) {
   const p = target.querySelector(".progress");
   if (p) p.style.width = `${Math.min(100,elapsed/dwellMs*100)}%`;
   if (elapsed >= dwellMs) {
-    const text = target.dataset.text || target.dataset.utility;
     clearDwell();
-    if (text) selectResponse(text);
+    activateGazeTarget(target);
   }
 }
 function clearDwell() {
-  document.querySelectorAll(".response-target").forEach(el => {
+  document.querySelectorAll(".response-target, .word-btn, .key").forEach(el => {
     el.classList.remove("active-gaze");
     const p=el.querySelector(".progress");
     if (p) p.style.width="0";
@@ -514,6 +640,28 @@ $("cancelCalibration").addEventListener("click",()=>$("calibrationDialog").close
 $("startMic").addEventListener("click",()=>{ try { state.recognition?.start(); } catch {} });
 $("stopMic").addEventListener("click",()=>state.recognition?.stop());
 $("demoTurn").addEventListener("click",()=>addTurn("partner","Did Emma enjoy her visit yesterday?"));
+$("toggleGazeMap").addEventListener("click", toggleGazeMap);
+
+function toggleGazeMap() {
+  const map = $("gazeMap");
+  const btn = $("toggleGazeMap");
+  if (map.classList.contains("visible")) {
+    map.classList.remove("visible");
+    map.innerHTML = "";
+    btn.textContent = "Show gaze map";
+    return;
+  }
+  map.innerHTML = "";
+  calibrationPoints.forEach(([nx, ny]) => {
+    const dot = document.createElement("div");
+    dot.className = "gaze-map-dot";
+    dot.style.left = `${nx * 100}%`;
+    dot.style.top = `${ny * 100}%`;
+    map.appendChild(dot);
+  });
+  map.classList.add("visible");
+  btn.textContent = "Hide gaze map";
+}
 $("regenerate").addEventListener("click",generateSuggestions);
 $("clearConversation").addEventListener("click",()=>{state.turns=[];renderTranscript();generateSuggestions();});
 $("undo").addEventListener("click",()=>{
@@ -559,8 +707,11 @@ generateSuggestions();
 
 const composeInput=document.getElementById("composeInput");
 document.querySelectorAll(".key").forEach(btn=>{
+ const prog = document.createElement("span");
+ prog.className = "progress";
+ btn.appendChild(prog);
  btn.addEventListener("click",()=>{
-   const k=btn.textContent;
+   const k=btn.dataset.label||btn.childNodes[0]?.textContent?.trim()||btn.textContent.trim();
    if(k==="Space") composeInput.value+=" ";
    else if(k==="⌫") composeInput.value=composeInput.value.slice(0,-1);
    else if(k==="Clear") composeInput.value="";
@@ -570,8 +721,11 @@ document.querySelectorAll(".key").forEach(btn=>{
  });
 });
 document.querySelectorAll(".word-btn").forEach(btn=>{
+ const prog = document.createElement("span");
+ prog.className = "progress";
+ btn.appendChild(prog);
  btn.addEventListener("click",()=>{
-   composeInput.value+=(composeInput.value.endsWith(" ")||composeInput.value===""?"":" ")+btn.textContent+" ";
+   composeInput.value+=(composeInput.value.endsWith(" ")||composeInput.value===""?"":" ")+btn.childNodes[0]?.textContent?.trim()+" ";
  });
 });
 function updateWordSuggestions(){
@@ -583,7 +737,12 @@ function updateWordSuggestions(){
  bar.innerHTML="";
  words.forEach(w=>{
    const b=document.createElement("button");
-   b.className="word-btn"; b.textContent=w;
+   b.className="word-btn";
+   const label=document.createTextNode(w);
+   b.appendChild(label);
+   const prog=document.createElement("span");
+   prog.className="progress";
+   b.appendChild(prog);
    b.onclick=()=>{composeInput.value+=(composeInput.value.endsWith(" ")||composeInput.value===""?"":" ")+w+" ";};
    bar.appendChild(b);
  });

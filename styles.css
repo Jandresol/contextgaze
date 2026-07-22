@@ -71,6 +71,19 @@ textarea { width:100%; border:1px solid #cbd3df; border-radius:12px; padding:12p
   border-radius:50%; pointer-events:none; z-index:10000; transform:translate(-50%,-50%);
   background:rgba(255,255,255,.65); display:none;
 }
+#gazeMap {
+  display:none; position:fixed; inset:0; pointer-events:none; z-index:9999;
+}
+#gazeMap.visible { display:block; }
+.gaze-map-dot {
+  position:absolute; width:28px; height:28px; border-radius:50%;
+  background:rgba(37,87,214,.15); border:2px solid #2557d6;
+  transform:translate(-50%,-50%);
+}
+.gaze-map-dot::after {
+  content:""; position:absolute; width:8px; height:8px; border-radius:50%;
+  background:#2557d6; left:50%; top:50%; transform:translate(-50%,-50%);
+}
 @media (max-width:820px) {
   .grid { grid-template-columns:1fr; }
   .responses { grid-template-columns:1fr; }
@@ -88,22 +101,41 @@ textarea { width:100%; border:1px solid #cbd3df; border-radius:12px; padding:12p
 .camera-help h2 { margin-bottom:8px; }
 .meter { height:12px; background:#e5eaf2; border-radius:999px; overflow:hidden; margin:12px 0; }
 .meter span { display:block; height:100%; width:0; background:#2557d6; transition:width .2s ease; }
-.calibration-dialog { width:min(1100px, calc(100% - 20px)); height:min(820px, calc(100% - 20px)); padding:16px; }
-.calibration-header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
-.calibration-stage { position:relative; height:calc(100% - 100px); min-height:520px; border-radius:18px; background:#f3f6fb; overflow:hidden; margin-top:12px; }
-#calibrationTarget { position:absolute; width:54px; height:54px; min-height:54px; padding:0; border-radius:50%; transform:translate(-50%,-50%); border:10px solid #dbe5ff; box-shadow:0 0 0 2px #2557d6; }
+.calibration-dialog { width:100vw; height:100vh; max-width:none; max-height:none; padding:0; border-radius:0; }
+.calibration-stage { position:fixed; inset:0; border-radius:0; background:#f3f6fb; overflow:hidden; margin:0; }
+.calibration-info-panel {
+  position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:16px;
+  background:rgba(255,255,255,.88); backdrop-filter:blur(6px);
+  border-radius:999px; padding:10px 20px; font-weight:700; font-size:15px;
+  box-shadow:0 4px 20px rgba(0,0,0,.1); z-index:2; white-space:nowrap;
+}
+#calibrationTarget { position:absolute; width:54px; height:54px; min-height:54px; padding:0; border-radius:50%; transform:translate(-50%,-50%); border:10px solid #dbe5ff; box-shadow:0 0 0 2px #2557d6; z-index:3; }
 #calibrationTarget::after { content:""; position:absolute; width:10px; height:10px; border-radius:50%; background:white; left:50%; top:50%; transform:translate(-50%,-50%); }
 #calibrationTarget.collecting { animation:pulse .45s infinite alternate; }
 #calibrationProgress { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); padding:8px 12px; border-radius:999px; background:white; font-weight:800; }
-@keyframes pulse { from{scale:1} to{scale:.78} }
+@keyframes pulse {
+  from { transform: translate(-50%,-50%) scale(1); }
+  to   { transform: translate(-50%,-50%) scale(.78); }
+}
 @media (max-width:820px) { .camera-card { grid-template-columns:1fr; } }
 
 
 .predictive-keyboard{margin-top:24px;border-top:1px solid #e5eaf2;padding-top:20px}
 .compose-bar input{width:100%;padding:14px;border:2px solid #dbe2ee;border-radius:12px;font-size:22px}
-.word-suggestions{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
-.word-btn{background:#edf4ff;color:#2557d6;border-radius:999px;padding:8px 14px}
+.word-suggestions{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+.word-btn{
+  background:#edf4ff;color:#2557d6;border-radius:999px;padding:14px 22px;
+  font-size:20px;font-weight:700;min-height:60px;position:relative;overflow:hidden;
+}
+.word-btn.active-gaze{border:2px solid #2557d6;box-shadow:0 0 0 4px rgba(37,87,214,.15);}
+.word-btn .progress{position:absolute;left:0;bottom:0;height:5px;width:0;background:#2557d6;}
 .keyboard-row{display:flex;gap:8px;margin:8px 0}
-.key{flex:1;background:#fff;color:#172033;border:1px solid #dbe2ee}
+.key{
+  flex:1;background:#fff;color:#172033;border:1px solid #dbe2ee;
+  min-height:80px;font-size:20px;font-weight:700;position:relative;overflow:hidden;
+}
 .key.wide{flex:4}
 .key.speak{flex:2;background:#2557d6;color:#fff}
+.key.active-gaze{border-color:#2557d6;box-shadow:0 0 0 4px rgba(37,87,214,.15);}
+.key .progress{position:absolute;left:0;bottom:0;height:5px;width:0;background:#2557d6;}

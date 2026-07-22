@@ -29,6 +29,7 @@
 <button id="startMic">Listen to partner</button>
 <button class="secondary" id="stopMic">Stop listening</button>
 <button class="secondary" id="demoTurn">Load demo turn</button>
+<button class="secondary" id="toggleGazeMap">Show gaze map</button>
 <label>
         Dwell
         <select id="dwellSelect">
@@ -126,17 +127,13 @@
 </section>
 </main>
 <dialog class="calibration-dialog" id="calibrationDialog">
-<div class="calibration-header">
-<div>
-<p class="eyebrow">9-POINT CALIBRATION</p>
-<h2 id="calibrationTitle">Look at the target</h2>
-<p id="calibrationInstructions">Keep looking at the dot and select it. The system will collect a short burst of samples.</p>
-</div>
-<button class="secondary" id="cancelCalibration">Cancel</button>
-</div>
 <div class="calibration-stage" id="calibrationStage">
 <button aria-label="Calibration target" id="calibrationTarget"></button>
-<div id="calibrationProgress">Point 1 of 9</div>
+<div class="calibration-info-panel">
+  <span id="calibrationTitle">Look at the target, then click it</span>
+  <span id="calibrationProgress">Point 1 of 13</span>
+  <button class="secondary" id="cancelCalibration">Cancel</button>
+</div>
 </div>
 </dialog>
 <dialog id="memoryDialog">
@@ -149,6 +146,8 @@
 </div>
 </dialog>
 <div aria-hidden="true" id="gazeDot"></div>
+<div aria-hidden="true" id="gazeMap"></div>
+<script src="config.js"></script>
 <script src="app.js" type="module"></script>
 </body>
 </html>

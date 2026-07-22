@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="contextgaze_keyboard_prototype">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/contextgaze_keyboard_prototype.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

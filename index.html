@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>ContextGaze AAC</title>
+<link href="styles.css" rel="stylesheet"/>
+</head>
+<body>
+<main class="app">
+<header>
+<div>
+<p class="eyebrow">RESEARCH PROTOTYPE</p>
+<h1>ContextGaze AAC</h1>
+<p class="subtitle">Conversation-aware AAC controlled by calibrated webcam gaze, voice, mouse, touch, or keyboard.</p>
+</div>
+<div class="status-stack">
+<span class="pill off" id="modelStatus">Vision not loaded</span>
+<span class="pill off" id="gazeStatus">Gaze off</span>
+<span class="pill off" id="calibrationStatus">Not calibrated</span>
+<span class="pill off" id="micStatus">Mic off</span>
+</div>
+</header>
+<section class="toolbar card">
+<button id="startGaze">Start camera</button>
+<button id="calibrate">Calibrate gaze</button>
+<button class="secondary" id="stopGaze">Stop camera</button>
+<button id="startMic">Listen to partner</button>
+<button class="secondary" id="stopMic">Stop listening</button>
+<button class="secondary" id="demoTurn">Load demo turn</button>
+<label>
+        Dwell
+        <select id="dwellSelect">
+<option value="650">0.65 s</option>
+<option selected="" value="900">0.9 s</option>
+<option value="1200">1.2 s</option>
+<option value="1600">1.6 s</option>
+</select>
+</label>
+</section>
+<section class="camera-card card">
+<div class="camera-wrap">
+<video autoplay="" id="camera" muted="" playsinline=""></video>
+<canvas id="cameraOverlay"></canvas>
+<div id="cameraMessage">Start the camera, center your face, then calibrate.</div>
+</div>
+<div class="camera-help">
+<h2>Gaze quality</h2>
+<p id="qualityText">Camera inactive.</p>
+<div class="meter"><span id="qualityMeter"></span></div>
+<p class="note">Keep your head position stable during calibration. Recalibrate after moving the laptop or chair.</p>
+</div>
+</section>
+<section class="grid">
+<div class="card conversation">
+<div class="section-title">
+<h2>Conversation</h2>
+<button class="text-button" id="clearConversation">Clear</button>
+</div>
+<div aria-live="polite" class="transcript" id="transcript"></div>
+<form id="partnerForm">
+<label for="partnerInput">Partner says</label>
+<div class="input-row">
+<input autocomplete="off" id="partnerInput" placeholder="Type or use the microphone…"/>
+<button type="submit">Add</button>
+</div>
+</form>
+</div>
+<div class="card memory">
+<div class="section-title">
+<h2>Personal memory</h2>
+<button class="text-button" id="editMemory">Edit</button>
+</div>
+<div class="chips" id="memoryChips"></div>
+<p class="note">Only relevant approved memories are retrieved for each turn.</p>
+</div>
+</section>
+<section class="card">
+<div class="section-title">
+<div>
+<h2>Suggested responses</h2>
+<p class="note" id="retrievalNote">Add a partner message to generate context-aware options.</p>
+</div>
+<button class="secondary" id="regenerate">Regenerate</button>
+</div>
+<div aria-label="Suggested AAC responses" class="responses" id="responses"></div>
+<div class="utility-grid">
+<button class="utility response-target" data-utility="Yes.">Yes</button>
+<button class="utility response-target" data-utility="No.">No</button>
+<button class="utility response-target" data-utility="Please repeat that.">Repeat</button>
+<button class="utility response-target" data-utility="I need help.">Help</button>
+<button class="utility danger" id="undo">Undo</button>
+<button class="utility" id="stopSpeaking">Stop voice</button>
+</div><section class="predictive-keyboard">
+<div class="compose-bar">
+<input id="composeInput" placeholder="Compose message..." type="text"/>
+</div>
+<div class="word-suggestions" id="wordSuggestions">
+<button class="word-btn">Emma</button>
+<button class="word-btn">Pictures</button>
+<button class="word-btn">Yesterday</button>
+<button class="word-btn">Please</button>
+<button class="word-btn">Comfortable</button>
+</div>
+<div class="keyboard">
+<div class="keyboard-row"><button class="key">Q</button><button class="key">W</button><button class="key">E</button><button class="key">R</button><button class="key">T</button><button class="key">Y</button><button class="key">U</button><button class="key">I</button><button class="key">O</button><button class="key">P</button></div>
+<div class="keyboard-row"><button class="key">A</button><button class="key">S</button><button class="key">D</button><button class="key">F</button><button class="key">G</button><button class="key">H</button><button class="key">J</button><button class="key">K</button><button class="key">L</button></div>
+<div class="keyboard-row"><button class="key">Z</button><button class="key">X</button><button class="key">C</button><button class="key">V</button><button class="key">B</button><button class="key">N</button><button class="key">M</button></div>
+<div class="keyboard-row">
+<button class="key wide">Space</button>
+<button class="key">⌫</button>
+<button class="key">Clear</button>
+<button class="key speak">Speak</button>
+</div></div></section>
+</section>
+<section class="card output">
+<div>
+<p class="eyebrow">LAST SPOKEN</p>
+<p id="lastSpoken">Nothing yet.</p>
+</div>
+<div class="voice-controls">
+<label>Voice <select id="voiceSelect"></select></label>
+<label>Rate <input id="rate" max="1.4" min="0.6" step="0.1" type="range" value="0.9"/></label>
+</div>
+</section>
+</main>
+<dialog class="calibration-dialog" id="calibrationDialog">
+<div class="calibration-header">
+<div>
+<p class="eyebrow">9-POINT CALIBRATION</p>
+<h2 id="calibrationTitle">Look at the target</h2>
+<p id="calibrationInstructions">Keep looking at the dot and select it. The system will collect a short burst of samples.</p>
+</div>
+<button class="secondary" id="cancelCalibration">Cancel</button>
+</div>
+<div class="calibration-stage" id="calibrationStage">
+<button aria-label="Calibration target" id="calibrationTarget"></button>
+<div id="calibrationProgress">Point 1 of 9</div>
+</div>
+</dialog>
+<dialog id="memoryDialog">
+<h2>Edit demo memory</h2>
+<p>One approved fact per line.</p>
+<textarea id="memoryEditor" rows="12"></textarea>
+<div class="dialog-actions">
+<button class="secondary" id="cancelMemory">Cancel</button>
+<button id="saveMemory">Save</button>
+</div>
+</dialog>
+<div aria-hidden="true" id="gazeDot"></div>
+<script src="app.js" type="module"></script>
+</body>
+</html>

@@ -2,6 +2,33 @@ import {
   FaceLandmarker,
   FilesetResolver
 } from "./vendor/mediapipe/vision_bundle.mjs";
+import { extractFeatures, distance } from "./calibration/featureExtraction.js";
+import { fitCalibrationModel, predictGaze } from "./calibration/calibrationModel.js";
+import { createExponentialGazeFilter } from "./calibration/gazeFilter.js";
+import { saveCalibration, loadCalibration } from "./calibration/storage.js";
+import { assessCalibrationSample, SAMPLE_QUALITY_CONFIG } from "./calibration/sampleQuality.js";
+import { estimateGazeConfidence, CONFIDENCE_CONFIG } from "./calibration/confidence.js";
+import { evaluateCalibration } from "./calibration/calibrationEvaluation.js";
+import { recordEvaluationSample, recordDwellCancelled, recordAccidentalActivation } from "./evaluation.js";
+import {
+  ONLINE_LEARNING_CONFIG,
+  createPendingInteraction,
+  recordInteractionFrame,
+  buildCandidateSample,
+  invalidateMostRecentSample,
+  checkNeighborCorrection,
+  isRepeatedEntry,
+  sweepPendingSamples,
+  shouldAttemptRefit,
+  refitWithOnlineSamples,
+  validateCandidateModel,
+  pushModelHistory,
+  popModelHistory
+} from "./calibration/onlineLearning.js";
+
+// How many recent full feature objects (see featureExtraction.js) to keep
+// for confidence's head-movement / roll / gaze-stability variance metrics.
+const FEATURE_HISTORY_LIMIT = 15;
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
@@ -31,25 +58,65 @@ const state = {
   latestFeatures: null,
   latestLandmarks: null,
   calibration: null,
+  calibrationEnvelope: null, // full persisted envelope (samples/pointSummaries/qualitySummary) for the active/loaded calibration — state.calibration stays just the bare {wx,wy,width,height} model so predictGaze/estimateGazeConfidence callers are unchanged
   calibrationSamples: [],
+  calibrationPointSummaries: [],
   calibrationPointIndex: 0,
   collecting: false,
   collectionBuffer: [],
+  collectionAttempts: 0,
   dwellTarget: null,
   dwellStart: 0,
-  smoothX: window.innerWidth / 2,
-  smoothY: window.innerHeight / 2,
-  lastSpoken: null
+  dwellTargetRect: null,
+  dwellPauseAccum: 0,
+  lastDwellFrameAt: 0,
+  gazeFilter: createExponentialGazeFilter(),
+  lastFaceQuality: null,
+  lastGazeActivationAt: 0,
+  lastSpoken: null,
+  featureHistory: [], // bounded rolling history of recent full feature objects, oldest first
+  lastGazeConfidence: null,
+
+  // Online self-calibration (Milestone 5) — see calibration/onlineLearning.js
+  // for the actual logic; these are just the bookkeeping fields app.js owns
+  // and threads through on the dwell lifecycle.
+  pendingInteraction: null,     // the in-progress dwell's featureHistory/predictionHistory/confidenceHistory, or null when not dwelling on anything
+  pendingOnlineSamples: [],     // candidate samples awaiting confirmation (see sweepPendingSamples)
+  confirmedOnlineSamples: [],   // promoted samples accumulated toward the next refit (rolling window, capped by ONLINE_LEARNING_CONFIG.maxSamples)
+  newPromotedSinceUpdate: 0,    // count of confirmedOnlineSamples added since the last accepted refit
+  lastOnlineModelUpdateAt: 0,   // performance.now() timestamp of the last accepted online refit (0 = never)
+  lastPendingSampleId: null,    // id of the most recently created pending candidate, for Undo correlation
+  dwellEnterLog: [],            // rolling log of {id, at} for repeated-entry/exit detection
+  calibrationModelHistory: []   // in-memory rollback stack of prior {wx,wy,width,height} models (see ONLINE_LEARNING_CONFIG.maxModelHistory)
 };
 
 const $ = id => document.getElementById(id);
 const stopWords = new Set("the a an and or but if then is are was were be been being to of in on at for with from this that it you your my me i we they he she do did does how what when where who why can could would should".split(" "));
-const calibrationPoints = [
-  [0.10, 0.10], [0.50, 0.10], [0.90, 0.10],
-  [0.10, 0.50], [0.50, 0.50], [0.90, 0.50],
-  [0.10, 0.90], [0.50, 0.90], [0.90, 0.90],
-  [0.30, 0.30], [0.70, 0.30], [0.30, 0.70], [0.70, 0.70]
-];
+// Configurable calibration point layouts (Milestone 4). "quick" is the
+// default per the plan's exact suggestion (top-left, top-right, center,
+// bottom-left, bottom-right); "accuracy" reuses the previous fixed 13-point
+// layout for users who want denser coverage. currentCalibrationPoints()
+// reads the live #calibrationModeSelect value; startCalibration() snapshots
+// its result into state.activeCalibrationPoints for the run in progress so
+// the layout can't change mid-calibration if the user edits the select
+// while the dialog happens to be open.
+const CALIBRATION_LAYOUTS = {
+  quick: [
+    [0.10, 0.10], [0.90, 0.10],
+    [0.50, 0.50],
+    [0.10, 0.90], [0.90, 0.90]
+  ],
+  accuracy: [
+    [0.10, 0.10], [0.50, 0.10], [0.90, 0.10],
+    [0.10, 0.50], [0.50, 0.50], [0.90, 0.50],
+    [0.10, 0.90], [0.50, 0.90], [0.90, 0.90],
+    [0.30, 0.30], [0.70, 0.30], [0.30, 0.70], [0.70, 0.70]
+  ]
+};
+function currentCalibrationPoints() {
+  const mode = $("calibrationModeSelect")?.value;
+  return CALIBRATION_LAYOUTS[mode] || CALIBRATION_LAYOUTS.quick;
+}
 
 function setPill(id, text, on) {
   const el = $(id);
@@ -299,6 +366,8 @@ function stopCamera() {
   setPill("gazeStatus", "Gaze off", false);
   $("qualityText").textContent = "Camera inactive.";
   $("qualityMeter").style.width = "0";
+  $("confidenceText").textContent = "";
+  state.lastGazeConfidence = null;
 }
 
 function resizeOverlay() {
@@ -321,60 +390,28 @@ async function processFrame() {
     if (landmarks?.length >= 478) {
       state.latestLandmarks = landmarks;
       state.latestFeatures = extractFeatures(landmarks);
+      state.featureHistory.push(state.latestFeatures);
+      if (state.featureHistory.length > FEATURE_HISTORY_LIMIT) state.featureHistory.shift();
       drawLandmarks(landmarks);
       updateQuality(landmarks);
-      if (state.collecting) state.collectionBuffer.push(state.latestFeatures);
+      // During calibration collection we keep the full feature object (not
+      // just .vector) so sampleQuality.js can compute iris/head/eyeOpenness
+      // variance metrics. The live prediction path below is unrelated and
+      // still only ever uses the flat vector.
+      if (state.collecting) {
+        state.collectionBuffer.push(state.latestFeatures);
+        state.collectionAttempts++;
+      }
       if (state.calibration) updatePredictedGaze(state.latestFeatures);
     } else {
       state.latestFeatures = null;
+      state.lastGazeConfidence = null;
       updateQuality(null);
       clearDwell();
+      if (state.collecting) state.collectionAttempts++;
     }
   }
   state.animationId = requestAnimationFrame(processFrame);
-}
-
-function avgPoint(points, ids) {
-  const p = ids.map(i => points[i]);
-  return {
-    x: p.reduce((s,v) => s + v.x, 0) / p.length,
-    y: p.reduce((s,v) => s + v.y, 0) / p.length,
-    z: p.reduce((s,v) => s + (v.z || 0), 0) / p.length
-  };
-}
-function distance(a,b) {
-  return Math.hypot(a.x-b.x, a.y-b.y);
-}
-function extractFeatures(p) {
-  const leftIris = avgPoint(p, [468,469,470,471,472]);
-  const rightIris = avgPoint(p, [473,474,475,476,477]);
-
-  const lOuter = p[33], lInner = p[133], lTop = p[159], lBottom = p[145];
-  const rInner = p[362], rOuter = p[263], rTop = p[386], rBottom = p[374];
-
-  const lx = (leftIris.x - lOuter.x) / Math.max(0.001, lInner.x - lOuter.x);
-  const ly = (leftIris.y - lTop.y) / Math.max(0.001, lBottom.y - lTop.y);
-  const rx = (rightIris.x - rInner.x) / Math.max(0.001, rOuter.x - rInner.x);
-  const ry = (rightIris.y - rTop.y) / Math.max(0.001, rBottom.y - rTop.y);
-
-  const xs = p.map(v => v.x), ys = p.map(v => v.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const nose = p[1];
-  const nx = (nose.x - minX) / Math.max(0.001, maxX-minX);
-  const ny = (nose.y - minY) / Math.max(0.001, maxY-minY);
-  const faceWidth = maxX-minX;
-  const roll = Math.atan2(p[263].y-p[33].y, p[263].x-p[33].x);
-
-  return expandFeatures([lx,ly,rx,ry,nx,ny,faceWidth,roll]);
-}
-function expandFeatures(v) {
-  const [lx,ly,rx,ry,nx,ny,fw,roll] = v;
-  return [
-    1, lx,ly,rx,ry,nx,ny,fw,roll,
-    lx*lx, ly*ly, rx*rx, ry*ry, nx*nx, ny*ny,
-    lx*ly, rx*ry, ((lx+rx)/2)*nx, ((ly+ry)/2)*ny
-  ];
 }
 
 function drawLandmarks(p) {
@@ -393,6 +430,7 @@ function updateQuality(p) {
   if (!p) {
     $("qualityText").textContent = "Face not detected. Center your face and improve lighting.";
     $("qualityMeter").style.width = "5%";
+    $("confidenceText").textContent = "";
     return;
   }
   const eyeDistance = distance(p[33],p[263]);
@@ -401,10 +439,31 @@ function updateQuality(p) {
   const centered = Math.max(0, 1 - Math.hypot(centerX, centerY)*2.3);
   const sizeScore = Math.min(1, eyeDistance/.24);
   const quality = Math.round(100 * (.55*centered + .45*sizeScore));
+  state.lastFaceQuality = quality;
   $("qualityMeter").style.width = `${quality}%`;
   $("qualityText").textContent = quality > 70 ? "Good face position." :
     quality > 45 ? "Usable. Move slightly closer and center your face." :
     "Poor. Center your face and move closer.";
+}
+
+// Confidence is a distinct signal from updateQuality() above (face-position
+// only, no calibration/prediction awareness) — this augments the same
+// gaze-quality area with a second, clearly-labeled line rather than
+// replacing or conflating the two messages. Only rendered once a calibration
+// model exists (updatePredictedGaze is the only caller), so before
+// calibration this area silently shows nothing extra.
+function updateConfidenceDisplay(confidence) {
+  const el = $("confidenceText");
+  if (!confidence) {
+    el.textContent = "";
+    return;
+  }
+  if (confidence.level === "excellent") {
+    el.textContent = "Gaze confidence: excellent.";
+    return;
+  }
+  const topReason = confidence.reasons[0] ? ` — ${confidence.reasons[0]}` : "";
+  el.textContent = `Gaze confidence: ${confidence.level}${topReason}`;
 }
 
 function startCalibration() {
@@ -412,34 +471,39 @@ function startCalibration() {
     alert("Start the camera and wait until your face is detected.");
     return;
   }
+  state.activeCalibrationPoints = currentCalibrationPoints();
   state.calibrationSamples = [];
   state.calibrationScreenPoints = [];
+  state.calibrationPointSummaries = [];
   state.calibrationPointIndex = 0;
   positionCalibrationTarget();
   $("calibrationDialog").showModal();
 }
 function positionCalibrationTarget() {
-  const [x,y] = calibrationPoints[state.calibrationPointIndex];
+  const points = state.activeCalibrationPoints || currentCalibrationPoints();
+  const [x,y] = points[state.calibrationPointIndex];
   const target = $("calibrationTarget");
   target.style.left = `${x*100}%`;
   target.style.top = `${y*100}%`;
-  $("calibrationProgress").textContent = `Point ${state.calibrationPointIndex+1} of ${calibrationPoints.length} — look at the dot, then click it`;
+  $("calibrationProgress").textContent = `Point ${state.calibrationPointIndex+1} of ${points.length} — look at the dot, then click it`;
   $("calibrationTitle").textContent = "Look at the target, then select it";
 }
 async function collectCalibrationPoint() {
   if (state.collecting || !state.latestFeatures) return;
   state.collecting = true;
   state.collectionBuffer = [];
+  state.collectionAttempts = 0;
   $("calibrationTarget").classList.add("collecting");
 
   // settling delay — discard samples while eyes are still moving to target
   $("calibrationTitle").textContent = "Hold still…";
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise(r => setTimeout(r, SAMPLE_QUALITY_CONFIG.settleMs));
   state.collectionBuffer = [];
+  state.collectionAttempts = 0;
 
   // actual collection window
   $("calibrationTitle").textContent = "Hold your gaze…";
-  await new Promise(r => setTimeout(r, 900));
+  await new Promise(r => setTimeout(r, SAMPLE_QUALITY_CONFIG.collectMs));
   state.collecting = false;
   $("calibrationTarget").classList.remove("collecting");
 
@@ -447,49 +511,48 @@ async function collectCalibrationPoint() {
   const r = targetEl.getBoundingClientRect();
   const targetX = r.left + r.width / 2;
   const targetY = r.top + r.height / 2;
-  const usable = state.collectionBuffer.filter(Boolean);
-  if (usable.length < 5) {
-    $("calibrationTitle").textContent = "Face lost. Try this point again.";
-    return;
-  }
+  const rawSamples = state.collectionBuffer.filter(Boolean);
+  const result = assessCalibrationSample(rawSamples, { attemptedFrames: state.collectionAttempts });
 
-  // outlier rejection: keep samples within 1 std-dev of mean for first two features (lx, ly)
-  const trimmed = rejectOutliers(usable);
-  const keepRatio = trimmed.length / usable.length;
-
-  // flash screen to show sample quality: green=good, blue=ok, red=poor
+  // flash screen to show sample quality: green=good, blue=ok, red=poor/retry
   const stage = $("calibrationStage");
-  if (keepRatio >= 0.85 && trimmed.length >= 8) {
+  if (result.accepted && result.score >= 0.85) {
     flashStage(stage, "rgba(31,157,90,.35)");   // green — steady gaze
-  } else if (keepRatio >= 0.6 && trimmed.length >= 4) {
+  } else if (result.accepted) {
     flashStage(stage, "rgba(37,87,214,.35)");   // blue — acceptable
   } else {
     flashStage(stage, "rgba(200,40,30,.35)");   // red — too noisy, advise retry
-    $("calibrationTitle").textContent = "Too much movement — try again for better accuracy";
-    state.collecting = false;
+    $("calibrationTitle").textContent = result.reasons[0] || "Sample quality too low — try again.";
     return;
   }
 
-  for (const f of trimmed) state.calibrationSamples.push({f, x:targetX, y:targetY});
+  // one calibration sample per surviving filtered frame, each using that
+  // frame's own feature vector (not the single representative/median
+  // vector, which is kept in `result` for diagnostics only).
+  for (const sample of result.filteredSamples) {
+    state.calibrationSamples.push({ f: sample.vector, x: targetX, y: targetY });
+  }
   state.calibrationScreenPoints = state.calibrationScreenPoints || [];
   state.calibrationScreenPoints.push({x: targetX, y: targetY});
 
+  // Per-point summary for the persisted qualitySummary/pointSummaries data
+  // model (Milestone 4): target, accepted sample count, and the same
+  // metrics/score assessCalibrationSample already computed above — no new
+  // scoring logic, just carrying the existing result through to storage.
+  state.calibrationPointSummaries.push({
+    pointIndex: state.calibrationPointIndex,
+    target: { x: targetX, y: targetY },
+    acceptedSampleCount: result.filteredSamples.length,
+    score: result.score,
+    metrics: result.metrics
+  });
+
+  const points = state.activeCalibrationPoints || currentCalibrationPoints();
   state.calibrationPointIndex++;
-  if (state.calibrationPointIndex >= calibrationPoints.length) finishCalibration();
+  if (state.calibrationPointIndex >= points.length) finishCalibration();
   else positionCalibrationTarget();
 }
 
-function rejectOutliers(samples) {
-  if (samples.length < 4) return samples;
-  // use indices 1 (lx) and 2 (ly) — the core iris position features
-  for (const idx of [1, 2]) {
-    const vals = samples.map(s => s[idx]);
-    const mean = vals.reduce((a,b) => a+b, 0) / vals.length;
-    const std = Math.sqrt(vals.reduce((a,b) => a + (b-mean)**2, 0) / vals.length);
-    samples = samples.filter(s => Math.abs(s[idx] - mean) <= 2 * std);
-  }
-  return samples;
-}
 function flashStage(el, color) {
   el.style.transition = "background .1s";
   el.style.background = color;
@@ -500,79 +563,93 @@ function flashStage(el, color) {
 }
 
 function finishCalibration() {
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  let evaluation;
   try {
-    state.calibration = fitCalibration(state.calibrationSamples);
-    localStorage.setItem("contextGazeCalibration", JSON.stringify(state.calibration));
-    setPill("calibrationStatus", "Calibrated", true);
-    $("calibrationDialog").close();
-    $("gazeDot").style.display = "block";
+    // evaluateCalibration() fits the model internally (via the unmodified
+    // fitCalibrationModel/ridgeSolve) and additionally computes training
+    // error, leave-one-point-out validation error (when enough points
+    // exist — see calibrationEvaluation.js), error by screen region, and
+    // the worst point. Its returned `model` is that same fit, so we reuse
+    // it as state.calibration rather than fitting a second time.
+    evaluation = evaluateCalibration(state.calibrationSamples, { viewport });
+    if (!evaluation) throw new Error("No calibration samples collected.");
+    state.calibration = evaluation.model;
   } catch (e) {
     console.error(e);
     alert("Calibration failed. Please repeat it with steadier head position.");
+    return;
   }
-}
 
-function fitCalibration(samples) {
-  const X = samples.map(s => s.f);
-  const yx = samples.map(s => s.x);
-  const yy = samples.map(s => s.y);
-  const lambda = 0.08;
-  return {
-    wx: ridgeSolve(X,yx,lambda),
-    wy: ridgeSolve(X,yy,lambda),
-    width: window.innerWidth,
-    height: window.innerHeight
+  const qualitySummary = {
+    trainingError: evaluation.trainingError,
+    validationError: evaluation.validationError,
+    validationMethod: evaluation.validationMethod,
+    pointCount: evaluation.pointCount,
+    errorByRegion: evaluation.errorByRegion,
+    worstPoint: evaluation.worstPoint,
+    referenceError: evaluation.referenceError,
+    isPoor: evaluation.isPoor
   };
-}
-function ridgeSolve(X,y,lambda) {
-  const rows = X.length, cols = X[0].length;
-  const A = Array.from({length:cols},()=>Array(cols).fill(0));
-  const b = Array(cols).fill(0);
-  for (let r=0;r<rows;r++) {
-    for (let i=0;i<cols;i++) {
-      b[i] += X[r][i]*y[r];
-      for (let j=0;j<cols;j++) A[i][j] += X[r][i]*X[r][j];
-    }
-  }
-  for (let i=1;i<cols;i++) A[i][i] += lambda;
-  return gaussianSolve(A,b);
-}
-function gaussianSolve(A,b) {
-  const n = b.length;
-  const M = A.map((row,i)=>[...row,b[i]]);
-  for (let col=0;col<n;col++) {
-    let pivot=col;
-    for (let r=col+1;r<n;r++) if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot=r;
-    [M[col],M[pivot]]=[M[pivot],M[col]];
-    const d=M[col][col];
-    if (Math.abs(d)<1e-10) throw new Error("Singular calibration matrix");
-    for (let j=col;j<=n;j++) M[col][j]/=d;
-    for (let r=0;r<n;r++) if (r!==col) {
-      const f=M[r][col];
-      for (let j=col;j<=n;j++) M[r][j]-=f*M[col][j];
-    }
-  }
-  return M.map(row=>row[n]);
-}
-function dot(a,b) {
-  return a.reduce((s,v,i)=>s+v*b[i],0);
-}
-function updatePredictedGaze(features) {
-  let x = dot(features,state.calibration.wx);
-  let y = dot(features,state.calibration.wy);
-  x *= window.innerWidth / state.calibration.width;
-  y *= window.innerHeight / state.calibration.height;
-  x = Math.max(0,Math.min(window.innerWidth,x));
-  y = Math.max(0,Math.min(window.innerHeight,y));
 
-  const alpha = 0.18;
-  state.smoothX += alpha*(x-state.smoothX);
-  state.smoothY += alpha*(y-state.smoothY);
+  const envelope = {
+    screen: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio || 1 },
+    camera: { width: $("camera").videoWidth || null, height: $("camera").videoHeight || null },
+    samples: state.calibrationSamples,
+    pointSummaries: state.calibrationPointSummaries,
+    model: state.calibration,
+    qualitySummary
+  };
+  saveCalibration(envelope);
+  state.calibrationEnvelope = envelope;
+
+  setPill("calibrationStatus", "Calibrated", true);
+  $("calibrationDialog").close();
+  $("gazeDot").style.display = "block";
+
+  // A fit that *succeeded* (no singular matrix, etc. — that case is the
+  // catch block above) can still be a poor fit: leave-one-point-out (or
+  // training-error fallback in quick mode) came back above
+  // CALIBRATION_EVALUATION_CONFIG.poorErrorPx. This is additive to, not a
+  // replacement for, the fitting-failure alert above — same alert()
+  // pattern the app already uses for calibration issues.
+  if (evaluation.isPoor) {
+    const px = Math.round(evaluation.referenceError);
+    alert(`Calibration completed, but accuracy looks poor (~${px}px average error). Consider recalibrating with steadier head position and gaze, or try Accuracy mode for denser coverage.`);
+  }
+}
+
+function updatePredictedGaze(features) {
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const raw = predictGaze(state.calibration, features.vector, viewport);
+
+  // Confidence is estimated from the raw (pre-clamp, pre-smoothing)
+  // prediction, not the smoothed dot position — smoothing already reacts
+  // to instability with a lag, so scoring the smoothed point would double
+  // count/mask the very jitter confidence is supposed to detect.
+  state.lastGazeConfidence = estimateGazeConfidence({
+    currentFeatures: features,
+    recentFeatureHistory: state.featureHistory,
+    model: state.calibration,
+    calibrationSamples: state.calibrationSamples,
+    prediction: raw,
+    viewport,
+    predictGazeFn: predictGaze
+  });
+  updateConfidenceDisplay(state.lastGazeConfidence);
+
+  let x = Math.max(0,Math.min(window.innerWidth,raw.x));
+  let y = Math.max(0,Math.min(window.innerHeight,raw.y));
+
+  const { x: smoothX, y: smoothY } = state.gazeFilter.update(x, y);
 
   const dotEl = $("gazeDot");
-  dotEl.style.left = `${state.smoothX}px`;
-  dotEl.style.top = `${state.smoothY}px`;
-  handleDwell(state.smoothX,state.smoothY);
+  dotEl.style.left = `${smoothX}px`;
+  dotEl.style.top = `${smoothY}px`;
+  // features/raw/confidence are threaded through purely so handleDwell can
+  // hand them to onlineLearning.js's recordInteractionFrame — the dwell
+  // timing/gating logic itself doesn't use them (unchanged from Milestone 3).
+  handleDwell(smoothX, smoothY, { features, rawPrediction: raw, confidence: state.lastGazeConfidence });
 }
 function gazeTargetAt(x, y) {
   return document.elementsFromPoint(x, y).find(el =>
@@ -597,34 +674,81 @@ function activateGazeTarget(target) {
     if (text) selectResponse(text);
   }
 }
+// Gaze-only dwell gate: while confidence is below CONFIDENCE_CONFIG's
+// dwellMinimum, the dwell timer is frozen (not reset) rather than letting
+// it keep accumulating toward activation — this only affects the gaze
+// dwell path below; click/touch/keyboard activation (selectResponse and
+// the .response-target/.word-btn/.key click listeners, plus the keydown
+// handler) never calls handleDwell and is unaffected.
+function isDwellConfidenceSufficient() {
+  const confidence = state.lastGazeConfidence;
+  return !confidence || confidence.score >= CONFIDENCE_CONFIG.dwellMinimum;
+}
 function handleDwell(x,y) {
   if ($("calibrationDialog").open) return;
   const target = gazeTargetAt(x, y);
   const dwellMs = Number($("dwellSelect").value);
   if (target !== state.dwellTarget) {
-    clearDwell();
+    const cancelledEarly = state.dwellTarget && (performance.now()-state.dwellStart) > 150;
+    clearDwell(cancelledEarly);
     state.dwellTarget = target || null;
     state.dwellStart = performance.now();
+    state.dwellPauseAccum = 0;
+    state.lastDwellFrameAt = state.dwellStart;
+    state.dwellTargetRect = target ? target.getBoundingClientRect() : null;
     if (target) target.classList.add("active-gaze");
     return;
   }
   if (!target) return;
-  const elapsed = performance.now()-state.dwellStart;
+  const now = performance.now();
+  const frameDelta = now - (state.lastDwellFrameAt || now);
+  state.lastDwellFrameAt = now;
+  const confidenceOk = isDwellConfidenceSufficient();
+  if (!confidenceOk) {
+    state.dwellPauseAccum += frameDelta;
+    target.classList.add("dwell-paused");
+  } else {
+    target.classList.remove("dwell-paused");
+  }
+  const elapsed = now - state.dwellStart - state.dwellPauseAccum;
   const p = target.querySelector(".progress");
   if (p) p.style.width = `${Math.min(100,elapsed/dwellMs*100)}%`;
+  if (!confidenceOk) return; // frozen this frame — never allowed to reach activation while paused
   if (elapsed >= dwellMs) {
+    const targetCenter = state.dwellTargetRect
+      ? { x: state.dwellTargetRect.left + state.dwellTargetRect.width/2, y: state.dwellTargetRect.top + state.dwellTargetRect.height/2 }
+      : null;
+    const errorPx = targetCenter ? distance({x, y}, targetCenter) : null;
+    const screenDiagonal = Math.hypot(window.innerWidth, window.innerHeight);
+    recordEvaluationSample({
+      timestamp: Date.now(),
+      predictedX: x,
+      predictedY: y,
+      targetX: targetCenter ? targetCenter.x : null,
+      targetY: targetCenter ? targetCenter.y : null,
+      errorPx,
+      normalizedError: errorPx !== null ? errorPx / screenDiagonal : null,
+      faceQuality: state.lastFaceQuality,
+      dwellDuration: elapsed,
+      selectedElementId: target.id || target.dataset.text || target.dataset.utility || target.textContent.trim()
+    });
     clearDwell();
+    state.lastGazeActivationAt = performance.now();
     activateGazeTarget(target);
   }
 }
-function clearDwell() {
+function clearDwell(cancelled = false) {
+  if (cancelled) recordDwellCancelled();
   document.querySelectorAll(".response-target, .word-btn, .key").forEach(el => {
-    el.classList.remove("active-gaze");
+    el.classList.remove("active-gaze", "dwell-paused");
     const p=el.querySelector(".progress");
     if (p) p.style.width="0";
   });
   state.dwellTarget=null;
   state.dwellStart=0;
+  state.dwellTargetRect=null;
+  state.dwellPauseAccum=0;
+  state.lastDwellFrameAt=0;
 }
 
 $("partnerForm").addEventListener("submit", e => {
@@ -652,7 +776,7 @@ function toggleGazeMap() {
     return;
   }
   map.innerHTML = "";
-  calibrationPoints.forEach(([nx, ny]) => {
+  currentCalibrationPoints().forEach(([nx, ny]) => {
     const dot = document.createElement("div");
     dot.className = "gaze-map-dot";
     dot.style.left = `${nx * 100}%`;
@@ -667,6 +791,7 @@ $("clearConversation").addEventListener("click",()=>{state.turns=[];renderTransc
 $("undo").addEventListener("click",()=>{
   const idx=[...state.turns].map(t=>t.role).lastIndexOf("user");
   if(idx>=0) state.turns.splice(idx,1);
+  if (performance.now() - state.lastGazeActivationAt < 4000) recordAccidentalActivation();
   speechSynthesis.cancel();
   $("lastSpoken").textContent="Undone.";
   renderTranscript();
@@ -693,12 +818,20 @@ window.addEventListener("beforeunload",stopCamera);
 
 const savedMemory=localStorage.getItem("contextGazeMemories");
 if(savedMemory){try{state.memories=JSON.parse(savedMemory)}catch{}}
-const savedCalibration=localStorage.getItem("contextGazeCalibration");
-if(savedCalibration){
-  try{
-    state.calibration=JSON.parse(savedCalibration);
-    setPill("calibrationStatus","Calibration saved",true);
-  }catch{}
+const savedCalibration=loadCalibration();
+if(savedCalibration && savedCalibration.model){
+  // loadCalibration() returns the full persisted envelope (see storage.js);
+  // state.calibration stays just the bare {wx,wy,width,height} model so
+  // predictGaze/estimateGazeConfidence's existing (model, ...) call sites
+  // are unchanged. The rest of the envelope (raw samples, per-point
+  // summaries, quality summary) is kept on state.calibrationEnvelope for
+  // diagnostics, and state.calibrationSamples is restored from it so
+  // estimateGazeConfidence's neighbor/residual lookups have real coverage
+  // data immediately after a reload instead of starting empty.
+  state.calibration=savedCalibration.model;
+  state.calibrationEnvelope=savedCalibration;
+  state.calibrationSamples=Array.isArray(savedCalibration.samples) ? savedCalibration.samples : [];
+  setPill("calibrationStatus","Calibration saved",true);
 }
 renderMemory();
 renderTranscript();

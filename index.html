@@ -25,6 +25,13 @@
 <section class="toolbar card">
 <button id="startGaze">Start camera</button>
 <button id="calibrate">Calibrate gaze</button>
+<label>
+        Calibration
+        <select id="calibrationModeSelect">
+<option selected="" value="quick">Quick (5 points)</option>
+<option value="accuracy">Accuracy (13 points)</option>
+</select>
+</label>
 <button class="secondary" id="stopGaze">Stop camera</button>
 <button id="startMic">Listen to partner</button>
 <button class="secondary" id="stopMic">Stop listening</button>
@@ -50,6 +57,7 @@
 <h2>Gaze quality</h2>
 <p id="qualityText">Camera inactive.</p>
 <div class="meter"><span id="qualityMeter"></span></div>
+<p id="confidenceText" class="note"></p>
 <p class="note">Keep your head position stable during calibration. Recalibrate after moving the laptop or chair.</p>
 </div>
 </section>

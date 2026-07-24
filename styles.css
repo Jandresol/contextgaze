@@ -48,6 +48,9 @@ form label { display:block; font-weight:700; margin:12px 0 6px; }
   background:#f7f9fc; color:#172033; border:2px solid #dbe2ee; overflow:hidden;
 }
 .response-target.active-gaze { border-color:#2557d6; box-shadow:0 0 0 5px rgba(37,87,214,.15); }
+.response-target.active-gaze.dwell-paused,
+.word-btn.active-gaze.dwell-paused,
+.key.active-gaze.dwell-paused { border-color:#c8281e; box-shadow:0 0 0 5px rgba(200,40,30,.15); }
 .response-target .progress {
   position:absolute; left:0; bottom:0; height:7px; width:0; background:#2557d6;
 }

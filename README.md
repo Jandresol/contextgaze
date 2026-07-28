@@ -1,6 +1,6 @@
 # ContextGaze
 
-ContextGaze is context-aware communication technology. Instead of predicting your next word from what you just typed — the way ordinary autocomplete does — it predicts what you're likely trying to say from the conversation itself: what your partner just said, who they are, and what it already knows about you. It then surfaces a small set of full, relevant responses (or a next-word prediction if you're composing freely) so getting a thought across takes far less input than typing it out.
+ContextGaze is context-aware communication technology. Instead of predicting your next word from what you just typed, the way ordinary autocomplete does, it predicts what you're likely trying to say from the conversation itself: what your partner just said, who they are, and what it already knows about you. It then surfaces a small set of full, relevant responses (or a next-word prediction if you're composing freely) so getting a thought across takes far less input than typing it out.
 
 That input can be your eyes. ContextGaze includes calibrated webcam gaze tracking, so anyone — not just someone at a keyboard — can select a suggestion, answer a question, or compose a message just by looking at it. Voice, mouse, touch, and keyboard all work the same way, side by side, so the input method never limits who can use it or when.
 
@@ -67,9 +67,3 @@ calibration/
   storage.js                   Versioned localStorage persistence for calibration data
   onlineLearning.js            Weak-label collection from normal use, to refine calibration over time
 ```
-
-## Roadmap
-
-ContextGaze's long-term direction — described in `contextgaze_master_plan.md` — is a fuller context-and-intent-aware communication system: conversation state tracking, a structured personal-memory graph, a partner model, and a communication planner that predicts intent and proposes the smallest useful set of actions, all built on a gaze engine reliable enough to be a primary input method.
-
-Near-term implementation work on that gaze engine is tracked milestone-by-milestone in `plan(1).md`. Completed so far: baseline evaluation instrumentation, modular calibration code, sample-quality validation, live confidence estimation, and an improved explicit-calibration flow. In progress: online self-calibration, adaptive dwell, improved gaze filtering, and developer debug tooling — all gated on keeping the gaze stack solid before further context/intent-engine work begins.
